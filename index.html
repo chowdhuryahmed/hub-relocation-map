@@ -1,0 +1,238 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hub Relocation Route Dashboard</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- CSV parser (handles commas, quotes, etc.) -->
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; }
+    .panel {
+      position: absolute; top: 12px; left: 12px; z-index: 1000;
+      background: #fff; padding: 12px 12px; border-radius: 10px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      width: 320px;
+    }
+    .row { margin-top: 8px; }
+    .label { font-size: 12px; color: #444; margin-bottom: 4px; }
+    select, button {
+      width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ddd;
+      font-size: 14px;
+    }
+    .stats {
+      margin-top: 10px; font-size: 13px; color: #222; line-height: 1.4;
+      background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 10px;
+    }
+    .tiny { font-size: 12px; color: #666; margin-top: 6px; }
+  </style>
+</head>
+
+<body>
+  <div class="panel">
+    <div style="font-size:16px;font-weight:700;">Hub Relocation Map</div>
+    <div class="tiny">Routes use OSRM (OpenStreetMap). Refresh page after sheet changes.</div>
+
+    <div class="row">
+      <div class="label">Select origin location</div>
+      <select id="originSelect"></select>
+    </div>
+
+    <div class="row">
+      <button id="drawBtn">Draw routes</button>
+    </div>
+
+    <div class="stats" id="statsBox">
+      Loading data…
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+<script>
+  // 1) PASTE YOUR PUBLISHED CSV LINKS HERE
+  const LOCATIONS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQSbj40C0zXAvuBK_YhgGstRJGBk7ACEqLpulxJzT_SE5_aeAetDbnPqMEB4MaQTy4EhF2IkcszUj3L/pub?gid=0&single=true&output=csv";
+  const HUBS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQSbj40C0zXAvuBK_YhgGstRJGBk7ACEqLpulxJzT_SE5_aeAetDbnPqMEB4MaQTy4EhF2IkcszUj3L/pub?gid=278580238&single=true&output=csv";
+
+  // OSRM public router
+  const OSRM_ROUTE_URL = (oLat, oLon, dLat, dLon) =>
+    `https://router.project-osrm.org/route/v1/driving/${oLon},${oLat};${dLon},${dLat}?overview=full&geometries=geojson`;
+
+  // Map init
+  const map = L.map("map").setView([23.80, 90.40], 11);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "© OpenStreetMap"
+  }).addTo(map);
+
+  let locations = []; // {key, name, lat, lon}
+  let hubs = [];      // {name, node, lat, lon, func}
+
+  let markersLayer = L.layerGroup().addTo(map);
+  let routesLayer = L.layerGroup().addTo(map);
+
+  function parseCSV(url) {
+    return new Promise((resolve, reject) => {
+      Papa.parse(url, {
+        download: true,
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => resolve(results.data),
+        error: (err) => reject(err)
+      });
+    });
+  }
+
+  function setStats(html) {
+    document.getElementById("statsBox").innerHTML = html;
+  }
+
+  function clearLayers() {
+    markersLayer.clearLayers();
+    routesLayer.clearLayers();
+  }
+
+  function addMarkers(originKey) {
+    const origin = locations.find(l => l.key === originKey);
+    if (!origin) return;
+
+    // Origin marker
+    const originMarker = L.circleMarker([origin.lat, origin.lon], {
+      radius: 9, weight: 2, fillOpacity: 0.6
+    }).addTo(markersLayer);
+    originMarker.bindPopup(`<b>${origin.name}</b><br/>(${origin.lat}, ${origin.lon})`);
+
+    // Hub markers
+    hubs.forEach(h => {
+      const m = L.circleMarker([h.lat, h.lon], { radius: 6, weight: 2, fillOpacity: 0.5 })
+        .addTo(markersLayer);
+      m.bindPopup(`<b>${h.name}</b><br/>Node: ${h.node || "-"}<br/>${h.func || ""}<br/>(${h.lat}, ${h.lon})`);
+    });
+  }
+
+  async function drawRoutes(originKey) {
+    const origin = locations.find(l => l.key === originKey);
+    if (!origin) return;
+
+    setStats("Drawing routes…");
+
+    routesLayer.clearLayers();
+
+    let totalKm = 0;
+    let bounds = [];
+
+    // Draw sequentially (9 hubs only) to avoid hammering the public server
+    for (let i = 0; i < hubs.length; i++) {
+      const h = hubs[i];
+
+      try {
+        const res = await fetch(OSRM_ROUTE_URL(origin.lat, origin.lon, h.lat, h.lon));
+        const json = await res.json();
+
+        if (!json.routes || !json.routes[0]) continue;
+
+        const route = json.routes[0];
+        const km = route.distance / 1000;
+        totalKm += km;
+
+        const line = L.geoJSON(route.geometry, { weight: 4, opacity: 0.75 }).addTo(routesLayer);
+        line.bindPopup(
+          `<b>${h.name}</b><br/>To: ${origin.name}<br/>Distance: ${km.toFixed(2)} km<br/>Duration: ${(route.duration/60).toFixed(1)} min`
+        );
+
+        bounds.push([origin.lat, origin.lon]);
+        bounds.push([h.lat, h.lon]);
+
+      } catch (e) {
+        // ignore single failures
+      }
+    }
+
+    if (bounds.length) map.fitBounds(bounds, { padding: [40, 40] });
+
+    setStats(`
+      <b>Origin:</b> ${origin.name}<br/>
+      <b>Hubs:</b> ${hubs.length}<br/>
+      <b>Total route distance:</b> ${totalKm.toFixed(2)} km
+      <div class="tiny">Tip: click a route line to see hub-wise distance and time.</div>
+    `);
+  }
+
+  function fillOriginDropdown() {
+    const sel = document.getElementById("originSelect");
+    sel.innerHTML = "";
+
+    locations.forEach(l => {
+      const opt = document.createElement("option");
+      opt.value = l.key;
+      opt.textContent = `${l.key} — ${l.name}`;
+      sel.appendChild(opt);
+    });
+
+    // Default select CURRENT if exists
+    if (locations.some(l => l.key === "CURRENT")) sel.value = "CURRENT";
+  }
+
+  async function init() {
+    setStats("Loading Locations + Hubs from Google Sheets…");
+
+    const locRows = await parseCSV(LOCATIONS_CSV_URL);
+    const hubRows = await parseCSV(HUBS_CSV_URL);
+
+    locations = locRows
+      .map(r => ({
+        key: (r["Location Key"] || "").trim(),
+        name: (r["Location Name"] || "").trim(),
+        lat: parseFloat(r["Latitude"]),
+        lon: parseFloat(r["Longitude"])
+      }))
+      .filter(x => x.key && !Number.isNaN(x.lat) && !Number.isNaN(x.lon));
+
+    hubs = hubRows
+      .map(r => ({
+        name: (r["Hub Name"] || "").trim(),
+        node: (r["Node"] || "").trim(),
+        lat: parseFloat(r["Lat"]),
+        lon: parseFloat(r["Lon"]),
+        func: (r["Function"] || "").trim()
+      }))
+      .filter(x => x.name && !Number.isNaN(x.lat) && !Number.isNaN(x.lon));
+
+    fillOriginDropdown();
+
+    clearLayers();
+    addMarkers(document.getElementById("originSelect").value);
+
+    setStats(`
+      Loaded <b>${locations.length}</b> locations and <b>${hubs.length}</b> hubs.<br/>
+      Choose an origin and click <b>Draw routes</b>.
+    `);
+
+    document.getElementById("drawBtn").addEventListener("click", async () => {
+      const key = document.getElementById("originSelect").value;
+      clearLayers();
+      addMarkers(key);
+      await drawRoutes(key);
+    });
+
+    document.getElementById("originSelect").addEventListener("change", () => {
+      const key = document.getElementById("originSelect").value;
+      clearLayers();
+      addMarkers(key);
+      setStats(`Origin changed to <b>${locations.find(l=>l.key===key)?.name || key}</b>.<br/>Click <b>Draw routes</b> to regenerate routes.`);
+    });
+  }
+
+  init().catch(err => {
+    setStats("Failed to load data. Check your CSV publish links and column headers.");
+  });
+</script>
+</body>
+</html>
