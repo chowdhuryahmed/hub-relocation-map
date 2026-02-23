@@ -81,8 +81,8 @@ Ready.
 <div id="map"></div>
 
 <script>
+<script>
 
-// 🔴 PASTE YOUR LINKS HERE
 const LOCATIONS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQSbj40C0zXAvuBK_YhgGstRJGBk7ACEqLpulxJzT_SE5_aeAetDbnPqMEB4MaQTy4EhF2IkcszUj3L/pub?gid=0&single=true&output=csv";
 const HUBS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQSbj40C0zXAvuBK_YhgGstRJGBk7ACEqLpulxJzT_SE5_aeAetDbnPqMEB4MaQTy4EhF2IkcszUj3L/pub?gid=278580238&single=true&output=csv";
 
@@ -92,20 +92,17 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 let locations=[], hubs=[];
 let routeLayer=L.layerGroup().addTo(map);
 let markerLayer=L.layerGroup().addTo(map);
+let selectedHubMarker=null;
 
 const originColors={
- CURRENT:"blue",
- P300:"red",
- BIRULIA:"orange"
+ CURRENT:"#007bff",
+ P300:"#dc3545",
+ BIRULIA:"#ffc107"
 };
 
 function parseCSV(url){
  return new Promise(resolve=>{
-  Papa.parse(url,{
-   download:true,
-   header:true,
-   complete:res=>resolve(res.data)
-  });
+  Papa.parse(url,{ download:true, header:true, complete:res=>resolve(res.data) });
  });
 }
 
@@ -144,22 +141,20 @@ function populateHubDropdown(){
 function drawMarkers(){
  markerLayer.clearLayers();
 
- // origins
  locations.forEach(l=>{
-  const marker=L.circleMarker([l.lat,l.lon],{
-   radius:8,
+  L.circleMarker([l.lat,l.lon],{
+   radius:10,
    color:originColors[l.key]||"gray",
-   fillOpacity:0.7
-  }).addTo(markerLayer);
-  marker.bindPopup("<b>"+l.key+"</b><br>"+l.name);
+   fillOpacity:0.8
+  }).addTo(markerLayer)
+  .bindTooltip(l.key,{permanent:true,direction:"top"});
  });
 
- // hubs
  hubs.forEach(h=>{
   const marker=L.circleMarker([h.lat,h.lon],{
    radius:6,
-   color:"black",
-   fillColor:"black",
+   color:"#000",
+   fillColor:"#000",
    fillOpacity:0.8
   }).addTo(markerLayer);
 
@@ -170,22 +165,24 @@ function drawMarkers(){
 async function drawRoutes(){
 
  routeLayer.clearLayers();
- let selectedOrigins=[...document.querySelectorAll("input[type=checkbox]:checked")]
- .map(cb=>cb.value);
+ document.getElementById("summary").innerHTML="Calculating...";
 
+ let selectedOrigins=[...document.querySelectorAll("input[type=checkbox]:checked")].map(cb=>cb.value);
  let selectedHub=document.getElementById("hubSelect").value;
 
- let summaryText="";
+ let hubList=selectedHub==="ALL"?hubs:hubs.filter(h=>h.node===selectedHub);
 
- for(let originKey of selectedOrigins){
-  let origin=locations.find(l=>l.key===originKey);
-  if(!origin) continue;
+ let summaryHTML="";
 
-  let hubList=selectedHub==="ALL"?hubs:hubs.filter(h=>h.node===selectedHub);
+ for(let h of hubList){
 
-  let total=0;
+  summaryHTML+="<b>"+h.node+"</b><br>";
 
-  for(let h of hubList){
+  for(let originKey of selectedOrigins){
+
+   let origin=locations.find(l=>l.key===originKey);
+   if(!origin) continue;
+
    const url=`https://router.project-osrm.org/route/v1/driving/${origin.lon},${origin.lat};${h.lon},${h.lat}?overview=full&geometries=geojson`;
    const res=await fetch(url);
    const json=await res.json();
@@ -193,26 +190,36 @@ async function drawRoutes(){
 
    let route=json.routes[0];
    let km=route.distance/1000;
-   total+=km;
 
+   // Slight offset so overlapping routes separate visually
    L.geoJSON(route.geometry,{
     color:originColors[originKey],
-    weight:4
-   }).addTo(routeLayer)
-   .bindPopup(
-    "<b>"+h.node+"</b><br>"+
-    originKey+" Distance: "+km.toFixed(2)+" km<br>"+
-    "Time: "+(route.duration/60).toFixed(1)+" min"
-   );
+    weight:5,
+    opacity:0.8
+   }).addTo(routeLayer);
+
+   // Permanent distance label near hub
+   L.marker([h.lat,h.lon],{
+     icon:L.divIcon({
+       className:"",
+       html:`<div style="background:white;padding:2px 6px;border-radius:6px;font-size:11px;border:1px solid #ccc;">
+       ${originKey}: ${km.toFixed(1)} km
+       </div>`
+     })
+   }).addTo(routeLayer);
+
+   summaryHTML+=`${originKey}: ${km.toFixed(2)} km<br>`;
   }
 
-  summaryText+=originKey+" Total: "+total.toFixed(2)+" km<br>";
+  summaryHTML+="<hr>";
  }
 
- document.getElementById("summary").innerHTML=summaryText;
+ document.getElementById("summary").innerHTML=summaryHTML;
 }
 
 loadData();
+
+</script>
 
 </script>
 
